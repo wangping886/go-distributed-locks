@@ -10,10 +10,29 @@ import (
 //see doc https://redis.io/commands/set
 const expiry = 3 * time.Second
 
-func AcquireLock(redisPool redis.Pool, resourceName string, randValue string) bool {
-	conn := redisPool.Get()
+type Mutex struct {
+	resorceName  string
+	value        string
+	genValueFunc func() (string, error)
+	pool         redis.Pool
+}
+
+func NewMutex(name string, pool redis.Pool) *Mutex {
+	return &Mutex{
+		resorceName:  name,
+		genValueFunc: genValue,
+		pool:         pool,
+	}
+}
+func (mux *Mutex) AcquireLock() bool {
+	conn := mux.pool.Get()
 	defer conn.Close()
-	reply, err := redis.String(conn.Do("SET", resourceName, randValue, "NX", "PX", int(expiry/time.Millisecond)))
+	value, err := mux.genValueFunc()
+	if err != nil {
+		return false
+	}
+	mux.value = value
+	reply, err := redis.String(conn.Do("SET", mux.resorceName, value, "NX", "PX", int(expiry/time.Millisecond)))
 	return err == nil && reply == "OK"
 }
 
@@ -25,10 +44,10 @@ var deleteScript = redis.NewScript(1, `
 	end
 `)
 
-func ReleaseLock(redisPool redis.Pool, resourceName string, randValue string) bool {
-	conn := redisPool.Get()
+func (mux *Mutex) ReleaseLock() bool {
+	conn := mux.pool.Get()
 	defer conn.Close()
-	status, err := redis.Int64(deleteScript.Do(conn, resourceName, randValue))
+	status, err := redis.Int64(deleteScript.Do(conn, mux.resorceName, mux.value))
 
 	return err == nil && status != 0
 }
